@@ -1,6 +1,6 @@
 # chatgpt-web-session-proxy
 
-Experimental **session-mode only** OpenAI Chat Completions-compatible proxy backed by a normal logged-in ChatGPT web browser session.
+Experimental **session-mode only** OpenAI Chat Completions-compatible proxy backed by a normal logged-in ChatGPT web browser session. Browser automation is powered by [**Patchright**](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright), a stealth-hardened Playwright fork.
 
 The intended flow is:
 
@@ -8,7 +8,7 @@ The intended flow is:
 pi
   -> POST http://127.0.0.1:4153/v1/chat/completions
   -> X-ChatGPT-Session: my-project-session
-  -> browser backend (Playwright Chromium or CDP-attached real Chrome)
+  -> Patchright-launched Chrome/Chromium (persistent profile)
   -> one chatgpt.com conversation per local session
   -> prompt-emulated tool calls
   -> OpenAI-compatible tool_calls back to pi
@@ -19,6 +19,12 @@ This is deliberately a browser adapter, not an implementation of undocumented Ch
 ## Important terms note
 
 As of September 2026, OpenAI's Europe Terms of Use prohibit automatically/programmatically extracting data or Output and also restrict reverse engineering and bypassing protective measures. Browser automation of ChatGPT may therefore conflict with the terms that apply to your account. Review the current terms before using this. For a supported integration, use the OpenAI API instead.
+
+## Why Patchright?
+
+Standard Playwright leaves detectable fingerprints (the `Runtime.enable` CDP leak, the `navigator.webdriver` flag, `--enable-automation`, etc.) that Cloudflare and similar bot-mitigation systems use to trigger CAPTCHA challenges. Patchright patches those out at the driver level, so a Patchright-launched browser session looks like a normal user session.
+
+**Patchright only works when it launches the browser itself.** Attaching to an externally started Chrome over CDP (`connectOverCDP`) bypasses every Patchright patch. This project therefore always uses `launchPersistentContext`.
 
 ## What is implemented
 
@@ -35,194 +41,84 @@ As of September 2026, OpenAI's Europe Terms of Use prohibit automatically/progra
 - optional local bearer auth via `PROXY_API_KEY`
 - `GET /v1/sessions` and `DELETE /v1/sessions/:id`
 - session tab TTL / max-open-session controls
+- Patchright stealth defaults: real Chrome channel, `viewport: null`, no header injection
 
 ## Deliberate limitations
 
 - ChatGPT's web DOM is not a stable API. Selectors can change.
-- Streaming is compatibility streaming, not token-by-token upstream streaming: the browser response is buffered first so the proxy can distinguish normal text from an emulated tool call.
+- Streaming is compatibility streaming, not token-by-token upstream streaming.
 - Only text message parts are supported in this MVP. Images/files are not forwarded.
 - The selected ChatGPT web model is whatever your web UI/account currently uses; `model` in the OpenAI request is only a compatibility label.
 - Tool calls are prompt-emulated. They are not ChatGPT Web's internal tool system.
 - If the client's transcript forks or rewrites history for an existing session, the proxy returns HTTP 409. Use a new session ID or delete/reset the old session.
+- Even with Patchright, aggressive server-side fingerprinting can still challenge you. The default `minimized` runtime is the recommended trade-off between stealth and low visual footprint.
 
 ## Requirements
 
 - Node.js 22+
-- either Playwright-managed Chromium **or** a locally installed Google Chrome
+- Patchright (installed as a dependency)
+- either Patchright-managed Chromium **or** a locally installed Google Chrome (**recommended**)
 - a ChatGPT account you can sign into normally in a browser
 
 ## Install
 
 ```bash
 npm install
+npx patchright install chromium
 ```
 
-If you want the default Playwright-managed Chromium backend, also install Chromium:
-
-```bash
-npx playwright install chromium
-```
-
-If you want to use your normal system installation of **Google Chrome**, you do not need the Playwright Chromium download. Chrome mode now launches an ordinary external Chrome process and the proxy attaches to it over the Chrome DevTools Protocol (CDP). Playwright does **not** launch the Chrome login browser.
+If you plan to use the `chrome` channel (recommended), you do not strictly need the Patchright Chromium download — Patchright will drive your installed Google Chrome.
 
 ## Browser choice
 
-Two browser modes are supported:
+Patchright drives one of two browser backends:
 
-| Mode | Command | Default profile directory |
+| Mode | Command flag | Default profile directory |
 | --- | --- | --- |
-| Playwright Chromium | `npm run login:chromium` / `npm run dev:chromium` | `~/.config/chatgpt-web-session-proxy/chromium-profile` |
-| Installed Google Chrome over CDP | `npm run login:chrome` / `npm run dev:chrome` | `~/.config/chatgpt-web-session-proxy/chrome-cdp-profile` |
+| Installed Google Chrome (`channel: "chrome"`) — **default & recommended** | `--browser chrome` | `~/.config/chatgpt-web-session-proxy/chrome-profile` |
+| Patchright-managed Chromium | `--browser chromium` | `~/.config/chatgpt-web-session-proxy/chromium-profile` |
 
-`chromium` remains the generic default, so `npm run login` and `npm run dev` behave like the Chromium commands.
+`chrome` is the default. `npm run login` and `npm run dev` are equivalent to their `:chrome` counterparts.
 
-### Recommended: real Chrome with headed login + minimized runtime
+## Runtime modes
+
+Both backends share the same three runtime modes, controlled by `CHATGPT_RUNTIME_MODE` or `--runtime-mode`:
+
+| Mode | Behavior | Notes |
+| --- | --- | --- |
+| `headless` (**default**) | `--headless=new` | Fully invisible; Patchright removes the headless fingerprints that would otherwise trigger a challenge |
+| `minimized` | Headed Chrome started with `--start-minimized` | Visible only as a taskbar entry; use this if a specific site still challenges headless |
+| `headed` | Fully visible Chrome window | Maximum compatibility, most visible |
+
+Patchright patches headless detection at the driver level, so `headless` is the recommended default when you want the browser to stay invisible. If a particular system still challenges it, switch to `minimized` for that session.
+
+## Login (one-time setup)
+
+Real login is always headed and fully visible so you can solve any challenge manually:
 
 ```bash
+npm run login            # default → chrome
+# or
 npm run login:chrome
+npm run login:chromium
 ```
 
-This starts your installed Chrome as a normal **headed** process using a dedicated profile and login-only CDP port `9222`. In the Chrome window that opens:
+In the window that opens:
 
 1. Go to `https://chatgpt.com/` if needed.
 2. Sign in normally and complete any security challenge manually.
 3. Verify that the ChatGPT composer/prompt box is visible.
 4. Return to the terminal and press **Enter**.
 
-The login helper now sends Chrome's real DevTools `Browser.close` command and, if needed, terminates the process it started. It waits until port `9222` is gone before returning, so the profile is fully unlocked before Pi uses it. This fixes the older behavior where pressing Enter could leave the Chrome window alive.
-
-By default the **same authenticated profile** is reused for runtime. There is no profile copy unless you explicitly set `CHATGPT_RUNTIME_PROFILE_DIR`. Reusing the exact profile avoids losing browser/session state between headed login and runtime.
-
-Defaults:
-
-```text
-Chrome profile:        ~/.config/chatgpt-web-session-proxy/chrome-cdp-profile
-headed login CDP:      http://127.0.0.1:9222
-runtime CDP:           http://127.0.0.1:9223
-runtime mode:          minimized
-```
-
-Then start the proxy:
-
-```bash
-npm run dev:chrome
-```
-
-The proxy stays browser-less while idle. On the first Pi/API request it starts ordinary installed Chrome with `--start-minimized`, using the same authenticated profile, then attaches over CDP on port `9223`. This is still normal headed Chrome, just minimized/backgrounded; it is intentionally **not** headless.
-
-Why? On some systems ChatGPT's security page accepts the authenticated profile in ordinary Chrome but presents a `Just a moment...` / bot challenge when that same profile is launched with `--headless=new`. The proxy does not try to disguise headless Chrome or bypass that challenge.
-
-If you still want to test headless mode explicitly:
-
-```bash
-CHATGPT_CHROME_RUNTIME_MODE=headless npm run dev:chrome
-```
-
-If ChatGPT returns a security challenge in that mode, switch back to the default `minimized` mode. You can also use a fully visible runtime with:
-
-```bash
-CHATGPT_CHROME_RUNTIME_MODE=headed npm run dev:chrome
-```
-
-### Real Chrome lifecycle
-
-```text
-setup/login (occasional)                    normal Pi usage
--------------------------                   ----------------
-npm run login:chrome                        npm run dev:chrome
-        |                                           |
-        v                                           | idle: no browser
-headed real Chrome on :9222                        |
-login / CAPTCHA                                    | first Pi request
-        |                                           v
-press Enter                                ordinary Chrome :9223
-        |                                    same auth profile
-Browser.close                                       |
-Chrome fully exits                                  v
-                                            --start-minimized
-                                                    |
-                                                    v
-                                               chatgpt.com
-```
-
-If ChatGPT expires the login or presents a security challenge in the default minimized mode, stop the proxy, rerun `npm run login:chrome`, complete the check manually, verify the prompt box, press Enter, and restart the proxy. The proxy does not automate or bypass the challenge.
-
-If you previously used version 0.5 with `chrome-headless-profile`, remove any `CHATGPT_RUNTIME_PROFILE_DIR` override so version 0.8 can reuse the authenticated login profile directly.
-
-### Playwright Chromium
-
-```bash
-npm run login:chromium
-npm run dev:chromium
-```
-
-For a compiled production build, use `npm run build` followed by `npm run start:chromium`.
-
-Its persistent login is stored separately in:
-
-```text
-~/.config/chatgpt-web-session-proxy/chromium-profile
-```
-
-### Custom Chrome/Chromium executable
-
-If Playwright cannot discover Chrome, or you want a specific build, set an explicit executable path:
-
-```bash
-CHATGPT_BROWSER=chrome \
-CHATGPT_BROWSER_EXECUTABLE_PATH=/path/to/google-chrome \
-npm run login
-```
-
-For Chrome mode, `CHATGPT_BROWSER_EXECUTABLE_PATH` is used both by `npm run login:chrome` and by the proxy when it auto-starts real Chrome. Headed login uses `CHATGPT_LOGIN_CDP_URL`; runtime uses `CHATGPT_CDP_URL`. For Chromium mode, the executable/channel settings are used by Playwright directly.
-
-You can also override the dedicated user-data directory:
-
-```bash
-CHATGPT_BROWSER=chrome \
-CHATGPT_PROFILE_DIR="$HOME/.config/chatgpt-web-session-proxy/my-chatgpt-chrome" \
-npm run login
-```
-
-In Chrome mode, `CHATGPT_PROFILE_DIR` is both the login and runtime profile by default. Set `CHATGPT_RUNTIME_PROFILE_DIR` only if you deliberately want a separate copied runtime profile.
-
-The proxy never asks for your password and does not copy authentication cookies/tokens into its own config. Authentication remains inside that browser profile.
-
-
-## If you previously hit a CAPTCHA loop
-
-Version 0.8 keeps the version 0.6 real-Chrome runtime behavior: the default runtime is `minimized`, not `headless`. If you upgraded from version 0.5, first stop any old runtime Chrome and clear old headless-specific environment overrides:
-
-```bash
-unset CHATGPT_CHROME_RUNTIME_MODE
-unset CHATGPT_RUNTIME_PROFILE_DIR
-npm run login:chrome
-# log in manually, verify the ChatGPT composer, then press Enter
-npm run dev:chrome
-```
-
-The first Pi request should now start ordinary Chrome minimized instead of `HeadlessChrome`. Do not try to automate or bypass a CAPTCHA/security challenge; complete it manually with `npm run login:chrome`.
-
-If Pi still references a failed old local session, use a new `X-ChatGPT-Session` value or reset it:
-
-```bash
-curl -X DELETE http://127.0.0.1:4153/v1/sessions/YOUR_SESSION_ID
-```
+The persistent profile is written to `~/.config/chatgpt-web-session-proxy/` and reused by the runtime. The login script does not use Patchright's stealth launch flags — it intentionally opens a normal visible window.
 
 ## Start
 
-For the recommended real-Chrome workflow:
-
 ```bash
+npm run dev              # default → chrome, minimized runtime
+# or explicitly
 npm run dev:chrome
-```
-
-This does not open Chrome immediately. Ordinary Chrome is started minimized only when Pi sends the first request.
-
-The generic default is still Playwright Chromium:
-
-```bash
-npm run dev
+npm run dev:chromium
 ```
 
 Default listen address:
@@ -241,8 +137,6 @@ Then configure the client to use that same value as its bearer API key.
 
 ## Basic curl test
 
-Start a fresh session:
-
 ```bash
 curl http://127.0.0.1:4153/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -260,9 +154,7 @@ For the next request with the same session, send the full OpenAI transcript incl
 
 ## Pi configuration
 
-Pi's current custom-model configuration supports an OpenAI-compatible base URL and custom headers. Copy `examples/pi-models.json` into `~/.pi/agent/models.json` or merge the provider into your existing file.
-
-Set a unique session value **before starting a Pi session**:
+Copy `examples/pi-models.json` into `~/.pi/agent/models.json` or merge the provider into your existing file.
 
 ```bash
 export CHATGPT_WEB_SESSION="$(basename "$PWD")-$(date +%s)"
@@ -329,7 +221,7 @@ This closes the live tab if present and deletes the persisted mapping/shadow tra
 
 ## Tool-call emulation
 
-When an OpenAI request contains `tools`, the ChatGPT prompt includes Pi's tool schemas and asks ChatGPT to use protocol v3. Version 0.8 no longer puts tool arguments inside JSON because large source/file bodies frequently contain quotes that ChatGPT does not reliably JSON-escape. Each argument is carried in its own raw block instead:
+When an OpenAI request contains `tools`, the ChatGPT prompt includes Pi's tool schemas and asks ChatGPT to use protocol v3. Each argument is carried in its own raw block so HTML, source code, shell syntax, quotes, and multiline text never depend on JSON escaping:
 
 ```text
 [[PI_TOOL_CALL]]
@@ -346,23 +238,11 @@ hello.html
 [[/PI_TOOL_CALL]]
 ```
 
-The proxy turns that into a standard OpenAI `tool_calls` response with valid JSON arguments before Pi sees it. This means HTML, source code, shell syntax, quotes, and multiline text no longer depend on the web model producing correctly escaped JSON. Numeric/boolean arguments are coerced using the tool schema Pi sent with the request.
+The proxy turns that into a standard OpenAI `tool_calls` response with valid JSON arguments before Pi sees it. Numeric/boolean arguments are coerced using the tool schema Pi sent with the request.
 
-Version 0.8 still accepts valid v2 JSON-style calls, old fenced calls, and bare single-tool JSON as compatibility fallbacks. It also has a narrow repair path for the common old `write` failure where the content body contains unescaped quotes. If ChatGPT emits `PI_TOOL_CALL` markers that cannot be parsed at all, the proxy now returns an explicit upstream error instead of leaking the markers to Pi as ordinary assistant text.
-
-The prompt explicitly requires a tool call for local project actions such as creating/editing files or running commands when a corresponding tool is available. After a tool result is returned by Pi, that result is forwarded into the same ChatGPT web conversation and ChatGPT can issue the next tool call.
+The parser still accepts valid v2 JSON-style calls, old fenced calls, and bare single-tool JSON as compatibility fallbacks. If ChatGPT emits `PI_TOOL_CALL` markers that cannot be parsed at all, the proxy returns an explicit upstream error instead of leaking the markers to Pi as ordinary assistant text.
 
 The proxy never executes local tools itself.
-
-### Upgrading from v0.7
-
-You do not strictly need a new ChatGPT conversation because every delta prompt contains a protocol-v3 reminder, but resetting the local proxy session once is recommended so the conversation does not retain older JSON-tool instructions:
-
-```bash
-curl -X DELETE http://127.0.0.1:4153/v1/sessions/YOUR_SESSION_ID
-```
-
-Or start Pi with a new `CHATGPT_WEB_SESSION` value.
 
 ### Tool debugging
 
@@ -374,19 +254,6 @@ finishReason: "tool_calls"
 toolCalls: ["write"]
 ```
 
-If the first line has `tools: []`, Pi did not send its tools to this provider. If tools are present but the response says `finishReason: "stop"` and `toolCalls: []`, the web model answered normally instead of requesting a tool. If the web model emits `[[PI_TOOL_CALL]]` but the block is malformed, version 0.8 returns a 502 protocol error instead of presenting the raw marker block in Pi.
-
-## Browser CLI overrides
-
-For convenience, `--browser` and `--profile-dir` are also accepted by the TypeScript entrypoints. The npm scripts use this for the named browser commands:
-
-```bash
-npm run login -- --browser chrome
-npm run dev -- --browser chrome
-```
-
-Environment variables are still useful for an executable path or other advanced settings.
-
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -395,20 +262,45 @@ Environment variables are still useful for an executable path or other advanced 
 | `PORT` | `4153` | Listen port |
 | `PROXY_API_KEY` | unset | Optional bearer auth for the local API |
 | `CHATGPT_PROXY_HOME` | `~/.config/chatgpt-web-session-proxy` | Base state directory |
-| `CHATGPT_BROWSER` | `chromium` | Browser backend: `chromium` or `chrome` |
-| `CHATGPT_PROFILE_DIR` | browser-specific under `$CHATGPT_PROXY_HOME` | Chromium profile, or real-Chrome login/runtime profile |
-| `CHATGPT_BROWSER_EXECUTABLE_PATH` | unset | Chrome executable for `login:chrome`, or direct executable override for Chromium mode |
+| `CHATGPT_BROWSER` | `chrome` | Browser backend: `chrome` (recommended) or `chromium` |
+| `CHATGPT_PROFILE_DIR` | browser-specific under `$CHATGPT_PROXY_HOME` | Persistent user-data directory |
+| `CHATGPT_BROWSER_EXECUTABLE_PATH` | unset | Explicit Chrome/Chromium executable path |
+| `CHATGPT_RUNTIME_MODE` | `minimized` | `minimized`, `headed`, or `headless` |
 | `CHATGPT_STATE_DIR` | `$CHATGPT_PROXY_HOME/sessions` | Persisted session metadata |
-| `CHATGPT_CDP_URL` | `http://127.0.0.1:9223` | CDP endpoint used by real-Chrome runtime |
-| `CHATGPT_LOGIN_CDP_URL` | `http://127.0.0.1:9222` | CDP endpoint used only by headed `login:chrome` |
-| `CHATGPT_RUNTIME_PROFILE_DIR` | same as `CHATGPT_PROFILE_DIR` | Optional separate runtime profile; when different, login state is copied after Chrome closes |
-| `CHATGPT_HEADLESS` | `false` | Playwright Chromium-mode headless setting |
-| `CHATGPT_CHROME_RUNTIME_MODE` | `minimized` | Real-Chrome runtime mode: `minimized` (recommended), `headed`, or `headless` (best effort; may trigger a security challenge) |
-| `CHATGPT_BROWSER_CHANNEL` | unset | Advanced Playwright channel override for Chromium mode only |
+| `CHATGPT_URL` | `https://chatgpt.com/` | Start URL |
 | `CHATGPT_MAX_SESSIONS` | `8` | Maximum simultaneously open ChatGPT tabs |
 | `CHATGPT_SESSION_TTL_MINUTES` | `120` | Close inactive live tabs after this many minutes; persisted state remains |
 | `CHATGPT_TURN_TIMEOUT_SECONDS` | `300` | Maximum wait for a ChatGPT answer |
 | `CHATGPT_SETTLE_MS` | `1200` | Stable-response delay after generation stops |
+
+## Upgrading from the CDP-based version (≤ 0.8)
+
+Version 0.9 removes the external-Chrome-over-CDP backend entirely. Migration steps:
+
+1. Delete the old CDP state:
+   ```bash
+   rm -rf ~/.config/chatgpt-web-session-proxy/chrome-cdp-profile
+   ```
+2. Unset obsolete environment variables:
+   ```bash
+   unset CHATGPT_CDP_URL CHATGPT_LOGIN_CDP_URL CHATGPT_RUNTIME_PROFILE_DIR CHATGPT_CHROME_RUNTIME_MODE
+   ```
+3. Reinstall dependencies and the Patchright Chromium driver:
+   ```bash
+   rm -rf node_modules package-lock.json
+   npm install
+   npx patchright install chromium
+   ```
+4. Re-run the login flow with the new persistent profile:
+   ```bash
+   npm run login
+   ```
+5. Start the proxy:
+   ```bash
+   npm run dev
+   ```
+
+Existing `/v1/sessions/*` state under `$CHATGPT_STATE_DIR` remains valid; only the browser profile changes.
 
 ## Updating selectors
 
@@ -422,7 +314,7 @@ Current fallbacks look for:
 - send/stop buttons by `data-testid`, CSS class, or accessible label
 - assistant messages via `data-message-author-role=assistant`
 
-If the prompt is missing, the proxy now distinguishes common login/security-challenge pages from a likely selector break and returns a more specific error.
+If the prompt is missing, the proxy distinguishes common login/security-challenge pages from a likely selector break and returns a more specific error.
 
 ## Development
 

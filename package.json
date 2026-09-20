@@ -1,9 +1,9 @@
 {
   "name": "chatgpt-web-session-proxy",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
-  "description": "Experimental session-mode OpenAI-compatible proxy backed by a logged-in ChatGPT web browser session.",
+  "description": "Experimental session-mode OpenAI-compatible proxy backed by a logged-in ChatGPT web browser session, using Patchright for stealth browser automation.",
   "scripts": {
     "dev": "tsx src/server.ts",
     "build": "tsc -p tsconfig.json",
@@ -11,16 +11,17 @@
     "login": "tsx src/login.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev:chromium": "tsx src/server.ts --browser chromium",
     "dev:chrome": "tsx src/server.ts --browser chrome",
-    "login:chromium": "tsx src/login.ts --browser chromium",
+    "dev:chromium": "tsx src/server.ts --browser chromium",
     "login:chrome": "tsx src/login.ts --browser chrome",
+    "login:chromium": "tsx src/login.ts --browser chromium",
+    "start:chrome": "node dist/src/server.js --browser chrome",
     "start:chromium": "node dist/src/server.js --browser chromium",
-    "start:chrome": "node dist/src/server.js --browser chrome"
+    "install:browser": "patchright install chromium"
   },
   "dependencies": {
     "fastify": "^5.6.1",
-    "playwright": "^1.55.0"
+    "patchright": "^1.62.1"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
