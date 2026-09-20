@@ -1,0 +1,33 @@
+{
+  "name": "chatgpt-web-session-proxy",
+  "version": "0.8.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental session-mode OpenAI-compatible proxy backed by a logged-in ChatGPT web browser session.",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "login": "tsx src/login.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev:chromium": "tsx src/server.ts --browser chromium",
+    "dev:chrome": "tsx src/server.ts --browser chrome",
+    "login:chromium": "tsx src/login.ts --browser chromium",
+    "login:chrome": "tsx src/login.ts --browser chrome",
+    "start:chromium": "node dist/src/server.js --browser chromium",
+    "start:chrome": "node dist/src/server.js --browser chrome"
+  },
+  "dependencies": {
+    "fastify": "^5.6.1",
+    "playwright": "^1.55.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

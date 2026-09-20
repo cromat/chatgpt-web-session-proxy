@@ -1,0 +1,32 @@
+{
+  "providers": {
+    "chatgpt-web": {
+      "baseUrl": "http://127.0.0.1:4153/v1",
+      "api": "openai-completions",
+      "apiKey": "local-proxy",
+      "headers": {
+        "X-ChatGPT-Session": "$CHATGPT_WEB_SESSION"
+      },
+      "compat": {
+        "supportsUsageInStreaming": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "chatgpt-web-session",
+          "name": "ChatGPT Web (session proxy)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  }
+}
