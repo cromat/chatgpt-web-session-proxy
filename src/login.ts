@@ -10,6 +10,30 @@ import {
 } from "./chrome-launch.js";
 import { config } from "./config.js";
 
+async function waitForEnter(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    process.stdin.resume();
+    process.stdin.once("data", () => {
+      // resume() keeps stdin referenced and can prevent this one-shot CLI from
+      // returning to the shell. Pause it as soon as Enter is received.
+      process.stdin.pause();
+      resolve();
+    });
+  });
+}
+
+function finishLoginCli(): void {
+  process.stdin.pause();
+  console.log("Login complete.");
+  console.log("You can now run npm run dev:chrome or npm run dev:chromium to start the server.");
+
+  // Normally the process exits naturally after stdin/browser cleanup. Keep a
+  // short unref'ed safety exit in case an OS/CDP handle lingers after Chrome
+  // has already shut down, which previously left the login command hanging.
+  const safetyExit = setTimeout(() => process.exit(0), 150);
+  safetyExit.unref();
+}
+
 if (config.browser === "chrome") {
   if (await cdpReachable(config.loginCdpUrl)) {
     throw new Error(
@@ -36,13 +60,10 @@ if (config.browser === "chrome") {
   }
   console.log(`Headed login CDP endpoint: ${config.loginCdpUrl}`);
   console.log(`Runtime CDP endpoint: ${config.cdpUrl}`);
-  console.log(`Runtime mode: ${config.chromeRuntimeMode}`);
+  console.log(`Runtime mode: ${config.chromeRuntimeModeRequested} -> ${config.chromeRuntimeMode}`);
   console.log("Log in to ChatGPT normally and make sure the prompt box is visible.");
   console.log("Then press Enter here. The helper will fully close Chrome before returning.");
-  await new Promise<void>((resolve) => {
-    process.stdin.resume();
-    process.stdin.once("data", () => resolve());
-  });
+  await waitForEnter();
 
   // Browser.close is an actual Chrome DevTools Protocol command. It is more reliable
   // for an externally launched Chrome than merely closing Playwright's CDP connection.
@@ -62,13 +83,17 @@ if (config.browser === "chrome") {
     await waitForCdpToStop(config.loginCdpUrl, 7_500);
   }
 
+  // Ensure Playwright releases its CDP transport even when Chrome has already
+  // exited after Browser.close.
+  await browser.close().catch(() => undefined);
+
   syncLoginProfileToRuntime();
   if (config.chromeRuntimeProfileDir === config.profileDir) {
     console.log(`Authenticated profile is ready for runtime use: ${config.profileDir}`);
   } else {
     console.log(`Authenticated profile copied to runtime profile: ${config.chromeRuntimeProfileDir}`);
   }
-  console.log(`You can now run npm run dev:chrome. Runtime mode is ${config.chromeRuntimeMode}.`);
+  console.log(`Runtime mode is ${config.chromeRuntimeMode}.`);
 } else {
   const context = await chromium.launchPersistentContext(
     config.profileDir,
@@ -79,9 +104,8 @@ if (config.browser === "chrome") {
   console.log(`Opened ChatGPT with ${browserDescription()}.`);
   console.log(`Persistent browser profile: ${config.profileDir}`);
   console.log("Sign in normally. When the ChatGPT prompt box is visible, press Enter here to close the browser.");
-  await new Promise<void>((resolve) => {
-    process.stdin.resume();
-    process.stdin.once("data", () => resolve());
-  });
+  await waitForEnter();
   await context.close();
 }
+
+finishLoginCli();

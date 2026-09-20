@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { config, type ChromeRuntimeMode } from "./config.js";
+import { config, type ResolvedChromeRuntimeMode } from "./config.js";
 
 function existing(paths: string[]): string | undefined {
   return paths.find((candidate) => candidate && fs.existsSync(candidate));
@@ -52,9 +52,7 @@ export function findChromeExecutable(): string {
     .find(Boolean);
   if (found) return found;
 
-  throw new Error(
-    "Could not find Google Chrome. Set CHATGPT_BROWSER_EXECUTABLE_PATH to the Chrome executable.",
-  );
+  throw new Error("Could not find Google Chrome. Set CHATGPT_BROWSER_EXECUTABLE_PATH to the Chrome executable.");
 }
 
 export function cdpPort(cdpUrl = config.cdpUrl): number {
@@ -72,7 +70,11 @@ export function cdpPort(cdpUrl = config.cdpUrl): number {
   return port;
 }
 
-export function chromeLaunchArgs(options: { mode: ChromeRuntimeMode; profileDir?: string; cdpUrl?: string }): string[] {
+export function chromeLaunchArgs(options: {
+  mode: ResolvedChromeRuntimeMode;
+  profileDir?: string;
+  cdpUrl?: string;
+}): string[] {
   const profileDir = options.profileDir ?? config.chromeRuntimeProfileDir;
   const cdpUrl = options.cdpUrl ?? config.cdpUrl;
   const args = [
@@ -81,23 +83,39 @@ export function chromeLaunchArgs(options: { mode: ChromeRuntimeMode; profileDir?
     "--no-first-run",
     "--no-default-browser-check",
   ];
+
   if (options.mode === "headless") {
     args.push("--headless=new", "--no-startup-window");
   } else if (options.mode === "minimized") {
     args.push("--start-minimized");
+  } else if (options.mode === "hidden") {
+    // Keep the initial native window out of sight until the OS-specific hider runs.
+    // On macOS --no-startup-window lets AppKit hide the app before Playwright creates a page.
+    if (process.platform === "win32") args.push("--window-position=-32000,-32000", "--window-size=1280,900");
+    if (process.platform === "darwin") args.push("--no-startup-window");
   }
-  args.push(config.chatgptUrl);
+
+  // Runtime only needs a browser process; Playwright creates/navigates the actual conversation page.
+  args.push(options.mode === "headed" || options.mode === "minimized" ? config.chatgptUrl : "about:blank");
   return args;
 }
 
-export function launchChromeForCdp(options: { mode: ChromeRuntimeMode; profileDir?: string; cdpUrl?: string }): { executable: string; pid?: number } {
+export function launchChromeForCdp(options: {
+  mode: ResolvedChromeRuntimeMode;
+  profileDir?: string;
+  cdpUrl?: string;
+}): { executable: string; pid?: number } {
   const executable = findChromeExecutable();
   const profileDir = options.profileDir ?? config.chromeRuntimeProfileDir;
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   const child = spawn(executable, chromeLaunchArgs(options), {
     detached: true,
     stdio: "ignore",
-    windowsHide: options.mode === "headless",
+    windowsHide: options.mode === "headless" || options.mode === "virtual" || options.mode === "hidden",
+    env: {
+      ...process.env,
+      ...(options.mode === "virtual" ? { DISPLAY: config.xvfbDisplay } : {}),
+    },
   });
   child.unref();
   return { executable, pid: child.pid };
@@ -105,9 +123,7 @@ export function launchChromeForCdp(options: { mode: ChromeRuntimeMode; profileDi
 
 export async function cdpReachable(cdpUrl = config.cdpUrl, timeoutMs = 1_500): Promise<boolean> {
   try {
-    const response = await fetch(`${cdpUrl.replace(/\/$/, "")}/json/version`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const response = await fetch(`${cdpUrl.replace(/\/$/, "")}/json/version`, { signal: AbortSignal.timeout(timeoutMs) });
     return response.ok;
   } catch {
     return false;
@@ -116,9 +132,7 @@ export async function cdpReachable(cdpUrl = config.cdpUrl, timeoutMs = 1_500): P
 
 export async function cdpLooksHeadless(cdpUrl = config.cdpUrl, timeoutMs = 1_500): Promise<boolean> {
   try {
-    const response = await fetch(`${cdpUrl.replace(/\/$/, "")}/json/version`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const response = await fetch(`${cdpUrl.replace(/\/$/, "")}/json/version`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return false;
     const info = await response.json() as { Browser?: string; "User-Agent"?: string };
     return /HeadlessChrome/i.test(`${info.Browser ?? ""} ${info["User-Agent"] ?? ""}`);
@@ -192,17 +206,12 @@ export async function terminateChromeProcess(pid: number | undefined, timeoutMs 
 
 function copyProfileFilter(source: string): boolean {
   const name = path.basename(source);
-  return ![
-    "SingletonCookie",
-    "SingletonLock",
-    "SingletonSocket",
-    "DevToolsActivePort",
-  ].includes(name);
+  return !["SingletonCookie", "SingletonLock", "SingletonSocket", "DevToolsActivePort"].includes(name);
 }
 
 export function syncLoginProfileToRuntime(): void {
   if (!fs.existsSync(config.profileDir)) {
-    throw new Error(`Chrome login profile does not exist: ${config.profileDir}. Run "npm run login:chrome" first.`);
+    throw new Error(`Chrome login profile does not exist: ${config.profileDir}. Run "npm run login" first.`);
   }
   if (path.resolve(config.profileDir) === path.resolve(config.chromeRuntimeProfileDir)) return;
 

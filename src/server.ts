@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { jsonCompletion, streamCompletion } from "./openai.js";
 import { SessionDivergedError, SessionManager, SessionRestoreError } from "./sessions.js";
 import type { ChatCompletionRequest } from "./types.js";
+import { resolveRequestSessionId } from "./session-id.js";
 
 const app = Fastify({ logger: true, bodyLimit: 10 * 1024 * 1024 });
 const browser = new BrowserBackend();
@@ -24,14 +25,19 @@ app.delete<{ Params: { id: string } }>("/v1/sessions/:id", async (request) => ({
 app.post<{ Body: ChatCompletionRequest }>("/v1/chat/completions", async (request, reply) => {
   const body = request.body;
   if (!body || !Array.isArray(body.messages) || !body.messages.length) return reply.code(400).send({ error: { message: "messages must be a non-empty array", type: "invalid_request_error" } });
-  const rawSession = request.headers["x-chatgpt-session"];
-  const sessionId = Array.isArray(rawSession) ? rawSession[0] : rawSession;
-  if (!sessionId?.trim()) return reply.code(400).send({ error: { message: "Session mode requires X-ChatGPT-Session. Use a unique stable value for each Pi agent session/project.", type: "invalid_request_error" } });
+  const resolvedSession = resolveRequestSessionId(request.headers, config.autoSetSessionEnv);
+  if (!resolvedSession) {
+    const message = config.autoSetSessionEnv
+      ? "No session identifier was received. Enable Pi compat.sendSessionAffinityHeaders or set X-ChatGPT-Session manually."
+      : "CHATGPT_WEB_AUTO_SET_SESSION_ENV=false requires X-ChatGPT-Session. Set CHATGPT_WEB_SESSION before starting Pi and configure the provider header as $CHATGPT_WEB_SESSION.";
+    return reply.code(400).send({ error: { message, type: "invalid_request_error" } });
+  }
+  const { sessionId, source: sessionSource } = resolvedSession;
 
   try {
-    request.log.info({ sessionId: sessionId.trim(), tools: (body.tools ?? []).map((tool) => tool.function?.name).filter(Boolean) }, "chat completion request");
-    const turn = await sessions.complete(sessionId.trim(), body.messages, body.tools ?? []);
-    request.log.info({ sessionId: sessionId.trim(), finishReason: turn.finishReason, toolCalls: turn.toolCalls.map((call) => call.function.name) }, "chat completion response");
+    request.log.info({ sessionId, sessionSource, tools: (body.tools ?? []).map((tool) => tool.function?.name).filter(Boolean) }, "chat completion request");
+    const turn = await sessions.complete(sessionId, body.messages, body.tools ?? []);
+    request.log.info({ sessionId, sessionSource, finishReason: turn.finishReason, toolCalls: turn.toolCalls.map((call) => call.function.name) }, "chat completion response");
     if (body.stream) { streamCompletion(reply, body.model || MODEL_ID, turn); return; }
     return reply.send(jsonCompletion(body.model || MODEL_ID, turn));
   } catch (error) {
@@ -49,3 +55,9 @@ process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 await sessions.init();
 sessions.startCleanupLoop();
 await app.listen({ host: config.host, port: config.port });
+app.log.info({
+  browser: config.browser,
+  runtimeModeRequested: config.chromeRuntimeModeRequested,
+  runtimeMode: config.chromeRuntimeMode,
+  cdpUrl: config.cdpUrl,
+}, "browser runtime configured");

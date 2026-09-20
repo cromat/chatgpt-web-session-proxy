@@ -5,18 +5,22 @@
       "api": "openai-completions",
       "apiKey": "local-proxy",
       "headers": {
-        "X-ChatGPT-Session": "$CHATGPT_WEB_SESSION"
+        "X-ChatGPT-Session": "!node -e \"process.stdout.write(process.env.CHATGPT_WEB_SESSION || '__PI_AUTO__')\""
       },
       "compat": {
         "supportsUsageInStreaming": false,
-        "supportsReasoningEffort": false
+        "supportsReasoningEffort": false,
+        "sendSessionAffinityHeaders": true,
+        "sessionAffinityFormat": "openai"
       },
       "models": [
         {
           "id": "chatgpt-web-session",
           "name": "ChatGPT Web (session proxy)",
           "reasoning": false,
-          "input": ["text"],
+          "input": [
+            "text"
+          ],
           "contextWindow": 128000,
           "maxTokens": 16384,
           "cost": {

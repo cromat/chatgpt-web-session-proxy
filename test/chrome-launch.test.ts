@@ -39,3 +39,26 @@ test("explicit headless runtime still uses modern headless mode", () => {
   assert.equal(args.includes("--no-startup-window"), true);
   assert.equal(args.includes("--start-minimized"), false);
 });
+
+test("virtual runtime stays headed and relies on DISPLAY rather than Chrome headless flags", () => {
+  const args = chromeLaunchArgs({
+    mode: "virtual",
+    profileDir: runtimeProfile,
+    cdpUrl: "http://127.0.0.1:9223",
+  });
+  assert.equal(args.includes("--headless=new"), false);
+  assert.equal(args.includes("--no-startup-window"), false);
+  assert.equal(args.includes("--start-minimized"), false);
+  assert.equal(args.includes("--remote-debugging-port=9223"), true);
+});
+
+test("hidden runtime stays headed and avoids a visible startup target", () => {
+  const args = chromeLaunchArgs({
+    mode: "hidden",
+    profileDir: runtimeProfile,
+    cdpUrl: "http://127.0.0.1:9223",
+  });
+  assert.equal(args.includes("--headless=new"), false);
+  assert.equal(args.includes("--start-minimized"), false);
+  assert.equal(args.at(-1), "about:blank");
+});

@@ -5,6 +5,7 @@ import type { Page } from "playwright";
 import { BrowserBackend } from "./browser.js";
 import { config } from "./config.js";
 import { parseAssistantTurn } from "./tool-protocol.js";
+import { buildProjectBootstrapTurn } from "./project-bootstrap.js";
 import { buildDeltaPrompt, buildInitialPrompt, commonPrefixLength } from "./transcript.js";
 import type { AssistantTurn, ChatMessage, ToolDefinition } from "./types.js";
 
@@ -25,6 +26,7 @@ type Session = {
   touchedAt: number;
   queue: SerialQueue;
   conversationUrl?: string;
+  bootstrapPending: boolean;
 };
 
 type PersistedSession = Omit<Session, "page" | "queue">;
@@ -77,6 +79,7 @@ export class SessionManager {
       createdAt: session.createdAt,
       touchedAt: session.touchedAt,
       conversationUrl: session.conversationUrl,
+      bootstrapPending: session.bootstrapPending,
     };
     const target = this.statePath(session.id);
     const temp = `${target}.${process.pid}.tmp`;
@@ -158,6 +161,7 @@ export class SessionManager {
       touchedAt: now,
       queue: new SerialQueue(),
       conversationUrl: persisted?.conversationUrl,
+      bootstrapPending: persisted?.bootstrapPending ?? false,
     };
     this.sessions.set(id, session);
     return session;
@@ -167,13 +171,47 @@ export class SessionManager {
     const session = await this.getOrCreate(id);
     return session.queue.run(async () => {
       session.touchedAt = Date.now();
+
+      // On the first turn of a brand-new session, deterministically ask Pi to
+      // collect a small, read-only project snapshot before ChatGPT sees the
+      // user's request. The following request will include this synthetic
+      // assistant tool call plus Pi's local tool result.
+      if (session.shadow.length === 0 && !session.bootstrapPending && config.projectBootstrap) {
+        const bootstrapTurn = buildProjectBootstrapTurn(tools);
+        if (bootstrapTurn) {
+          session.shadow = [
+            ...messages,
+            { role: "assistant", content: null, tool_calls: bootstrapTurn.toolCalls },
+          ];
+          session.bootstrapPending = true;
+          await this.persist(session);
+          return bootstrapTurn;
+        }
+      }
+
       let prompt: string;
-      if (session.shadow.length === 0) {
+      if (session.bootstrapPending) {
+        const prefix = commonPrefixLength(session.shadow, messages);
+        if (prefix !== session.shadow.length) {
+          throw new SessionDivergedError(`Session ${id} diverged while waiting for the automatic project snapshot at message ${prefix}. Reset it or start a new Pi session (or use a new explicit X-ChatGPT-Session value).`);
+        }
+        const delta = messages.slice(prefix);
+        if (!delta.length) throw new SessionDivergedError(`Session ${id} is waiting for Pi's automatic project-snapshot tool result.`);
+        const expectedCallId = session.shadow.at(-1)?.tool_calls?.[0]?.id;
+        const hasBootstrapResult = delta.some((message) => message.role === "tool" && (!expectedCallId || message.tool_call_id === expectedCallId));
+        if (!hasBootstrapResult) {
+          throw new SessionDivergedError(`Session ${id} did not include the automatic project-snapshot tool result. Reset it or start a new Pi session (or use a new explicit X-ChatGPT-Session value).`);
+        }
+        // ChatGPT has not received anything for this session yet, so send the
+        // complete client transcript: original request -> synthetic bash call
+        // -> local snapshot result. ChatGPT can then continue the original task.
+        prompt = buildInitialPrompt(messages, tools);
+      } else if (session.shadow.length === 0) {
         prompt = buildInitialPrompt(messages, tools);
       } else {
         const prefix = commonPrefixLength(session.shadow, messages);
         if (prefix !== session.shadow.length) {
-          throw new SessionDivergedError(`Session ${id} diverged at message ${prefix}. Reset it or use a new X-ChatGPT-Session value.`);
+          throw new SessionDivergedError(`Session ${id} diverged at message ${prefix}. Reset it or start a new Pi session (or use a new explicit X-ChatGPT-Session value).`);
         }
         const delta = messages.slice(prefix);
         if (!delta.length) throw new SessionDivergedError(`Session ${id} has no new messages; refusing to duplicate an old ChatGPT turn.`);
@@ -181,6 +219,7 @@ export class SessionManager {
       }
 
       const turn = parseAssistantTurn(await this.browser.sendPrompt(session.page, prompt), tools);
+      session.bootstrapPending = false;
       session.shadow = [...messages, { role: "assistant", content: turn.content, ...(turn.toolCalls.length ? { tool_calls: turn.toolCalls } : {}) }];
       session.conversationUrl = this.validConversationUrl(session.page.url()) ?? session.conversationUrl;
       await this.persist(session);

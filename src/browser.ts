@@ -2,6 +2,8 @@ import { chromium, type Browser, type BrowserContext, type Locator, type Page } 
 import { config } from "./config.js";
 import { persistentContextOptions } from "./browser-launch.js";
 import { cdpLooksHeadless, cdpReachable, ensureRuntimeProfile, launchChromeForCdp, terminateChromeProcess, waitForCdp, waitForCdpToStop } from "./chrome-launch.js";
+import { startXvfb, stopXvfb, type XvfbHandle } from "./xvfb.js";
+import { hideNativeChrome } from "./native-visibility.js";
 
 const PROMPT_SELECTORS = [
   "#prompt-textarea",
@@ -31,6 +33,7 @@ export class BrowserBackend {
   private externalBrowser = false;
   private ownsChromeProcess = false;
   private chromePid?: number;
+  private xvfb?: XvfbHandle;
 
   async start(): Promise<void> {
     if (this.context) return;
@@ -38,6 +41,13 @@ export class BrowserBackend {
     if (config.browser === "chrome") {
       const expectedHeadless = config.chromeRuntimeMode === "headless";
       if (await cdpReachable(config.cdpUrl)) {
+        if (config.chromeRuntimeMode === "virtual" || config.chromeRuntimeMode === "hidden") {
+          throw new Error(
+            `Chrome is already listening at runtime CDP ${config.cdpUrl}. ` +
+            `For ${config.chromeRuntimeMode} mode the proxy must start Chrome itself so it can guarantee that the browser stays invisible. ` +
+            `Stop the existing runtime Chrome and retry.`,
+          );
+        }
         const actualHeadless = await cdpLooksHeadless(config.cdpUrl);
         if (actualHeadless !== expectedHeadless) {
           throw new Error(
@@ -50,6 +60,7 @@ export class BrowserBackend {
       } else {
         try {
           ensureRuntimeProfile();
+          if (config.chromeRuntimeMode === "virtual") this.xvfb = await startXvfb();
           const launched = launchChromeForCdp({
             mode: config.chromeRuntimeMode,
             profileDir: config.chromeRuntimeProfileDir,
@@ -57,6 +68,7 @@ export class BrowserBackend {
           });
           this.chromePid = launched.pid;
           await waitForCdp(config.cdpUrl);
+          if (config.chromeRuntimeMode === "hidden") hideNativeChrome(this.chromePid);
           const actualHeadless = await cdpLooksHeadless(config.cdpUrl);
           if (actualHeadless !== expectedHeadless) {
             throw new Error(
@@ -67,9 +79,16 @@ export class BrowserBackend {
           this.ownsChromeProcess = true;
           this.externalBrowser = false;
         } catch (launchError) {
+          if (this.chromePid) {
+            await terminateChromeProcess(this.chromePid).catch(() => undefined);
+            await waitForCdpToStop(config.cdpUrl, 3_000).catch(() => undefined);
+          }
+          this.chromePid = undefined;
+          await stopXvfb(this.xvfb).catch(() => undefined);
+          this.xvfb = undefined;
           throw new Error(
             `Could not auto-start authenticated Chrome in ${config.chromeRuntimeMode} mode at ${config.cdpUrl}. ` +
-            `Run "npm run login:chrome" to refresh the login, then retry. ` +
+            `Run "npm run login" to refresh the login, then retry. ` +
             `Launch error: ${launchError instanceof Error ? launchError.message : String(launchError)}`,
           );
         }
@@ -104,6 +123,8 @@ export class BrowserBackend {
           await terminateChromeProcess(this.chromePid);
           await waitForCdpToStop(config.cdpUrl, 5_000).catch(() => undefined);
         }
+      } finally {
+        await stopXvfb(this.xvfb).catch(() => undefined);
       }
     } else {
       await this.context?.close().catch(() => undefined);
@@ -113,12 +134,17 @@ export class BrowserBackend {
     this.externalBrowser = false;
     this.ownsChromeProcess = false;
     this.chromePid = undefined;
+    this.xvfb = undefined;
   }
 
   async newConversationPage(url = config.chatgptUrl): Promise<Page> {
     await this.start();
     const page = await this.context!.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    if (config.browser === "chrome" && config.chromeRuntimeMode === "hidden" && this.ownsChromeProcess) {
+      // Re-apply after the first real page exists. Windows creates its top-level window lazily.
+      hideNativeChrome(this.chromePid);
+    }
     await this.assertLoggedIn(page);
     return page;
   }
@@ -167,8 +193,8 @@ export class BrowserBackend {
       .slice(0, 400);
     const challenge = /verify you are human|checking your browser|just a moment|cloudflare|captcha|security check/i.test(`${title} ${body}`);
     const login = /log in|sign up|continue with google|continue with microsoft|continue with apple/i.test(body);
-    if (challenge) return `The attached Chrome tab appears to be on a bot/security challenge (${title || url}). Complete it manually in the same Chrome window before using Pi.`;
-    if (login) return `The attached Chrome profile does not appear to be logged in to ChatGPT (${title || url}). Log in manually in the same Chrome window before using Pi.`;
+    if (challenge) return `The attached Chrome tab appears to be on a bot/security challenge (${title || url}).`;
+    if (login) return `The attached Chrome profile does not appear to be logged in to ChatGPT (${title || url}).`;
     return `No ChatGPT prompt editor was found. URL=${url}${title ? ` title=${JSON.stringify(title)}` : ""}. The ChatGPT UI may have changed.`;
   }
 
@@ -177,8 +203,8 @@ export class BrowserBackend {
     const diagnostic = await this.pageDiagnostic(page);
     const chromeHint = config.browser === "chrome"
       ? (config.chromeRuntimeMode === "headless"
-        ? ` Headless Chrome is currently hitting ChatGPT's security challenge. This proxy does not attempt to bypass it. Use the default minimized runtime instead: unset CHATGPT_CHROME_RUNTIME_MODE (or set it to "minimized"), run "npm run login:chrome", then retry Pi.`
-        : ` Stop the proxy, run "npm run login:chrome", verify ChatGPT works in the headed browser, press Enter so Chrome closes completely, then retry Pi.`)
+        ? ` Headless Chrome is currently hitting ChatGPT's security challenge. This proxy does not attempt to bypass it. Use the default auto runtime instead, run "npm run login", then retry Pi.`
+        : ` Stop the proxy, run "npm run login", verify ChatGPT works in the headed browser, press Enter so Chrome closes completely, then retry Pi.`)
       : " Run \"npm run login:chromium\" first and finish login in the browser.";
     throw new Error(`${diagnostic}${chromeHint}`);
   }
